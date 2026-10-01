@@ -25,7 +25,7 @@ mode before changing a mapping.
 ## Build And Install
 
 ```bash
-git clone https://github.com/JDRV-space/mousefix.git
+git clone https://github.com/zzz-bot-7/mousefix.git
 cd mousefix
 swift build -c release --only-use-versions-from-resolved-file
 
