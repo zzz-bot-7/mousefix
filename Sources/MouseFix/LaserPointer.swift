@@ -29,7 +29,7 @@ final class LaserPointer {
         window.backgroundColor = .clear
         window.level = .screenSaver
         window.ignoresMouseEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.hasShadow = false
 
         // Draw the circle.
@@ -46,7 +46,7 @@ final class LaserPointer {
         // Position at current mouse location.
         let pos = NSEvent.mouseLocation
         centerWindow(at: pos)
-        window.orderFront(nil)
+        window.orderFrontRegardless()
     }
 
     func hide() {
@@ -56,16 +56,36 @@ final class LaserPointer {
 
     func updatePosition(event: CGEvent) {
         guard isVisible else { return }
-        // CGEvent location is in top-left origin; NSWindow uses bottom-left.
-        let cgPoint = event.location
-        guard let screen = NSScreen.main else { return }
-        let flippedY = screen.frame.height - cgPoint.y
-        centerWindow(at: NSPoint(x: cgPoint.x, y: flippedY))
+        centerWindow(at: appKitPoint(from: event.location))
     }
 
     private func centerWindow(at point: NSPoint) {
         let half = diameter / 2
         window?.setFrameOrigin(NSPoint(x: point.x - half, y: point.y - half))
+    }
+
+    /// Converts global Quartz coordinates to AppKit coordinates for the
+    /// display containing the pointer. Using only `NSScreen.main` breaks when
+    /// the pointer is on an external display above or beside the main display.
+    private func appKitPoint(from quartzPoint: CGPoint) -> NSPoint {
+        for screen in NSScreen.screens {
+            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+                    as? NSNumber else {
+                continue
+            }
+
+            let displayBounds = CGDisplayBounds(CGDirectDisplayID(screenNumber.uint32Value))
+            guard displayBounds.contains(quartzPoint) else {
+                continue
+            }
+
+            return NSPoint(
+                x: screen.frame.minX + quartzPoint.x - displayBounds.minX,
+                y: screen.frame.maxY - (quartzPoint.y - displayBounds.minY)
+            )
+        }
+
+        return NSEvent.mouseLocation
     }
 }
 

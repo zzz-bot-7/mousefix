@@ -2,6 +2,8 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+let mouseFixVersion = "0.2.0"
+
 // MARK: - CLI Argument Parsing
 
 let args = CommandLine.arguments
@@ -15,7 +17,7 @@ case "run":
 case "help", "--help", "-h":
     printUsage()
 case "version", "--version":
-    print("mousefix 0.1.0")
+    print("mousefix \(mouseFixVersion)")
 default:
     print("Unknown command: \(command)")
     printUsage()
@@ -51,16 +53,41 @@ func runDiscover() {
     let haptic = HapticEngine()
     let laser = LaserPointer()
     let gesture = GestureEngine(buttonMap: config.defaultProfile, hapticEngine: haptic)
-    let eventTap = EventTap(buttonMap: config.defaultProfile, gestureEngine: gesture, laserPointer: laser)
+    let resolver = InputDeviceResolver(targetProductName: "mx master")
+    let verticalScroll = SmoothScrollEngine(settings: config.defaultProfile.smoothScroll)
+    let horizontalScroll = SmoothScrollEngine(settings: config.defaultProfile.smoothScroll)
+    let eventTap = EventTap(
+        buttonMap: config.defaultProfile,
+        gestureEngine: gesture,
+        laserPointer: laser,
+        deviceResolver: resolver,
+        verticalScrollEngine: verticalScroll,
+        horizontalScrollEngine: horizontalScroll
+    )
     eventTap.discoverMode = true
+    let logitechControls = LogitechControlMonitor(
+        deviceNameFilter: "mx master",
+        monitoredControlIDs:
+            LogitechControlMonitor.gestureControlIDs
+            .union([LogitechControlMonitor.smartShiftControlID])
+    ) { controlID, isPressed in
+        print(String(
+            format: "[discover] Logitech control 0x%04X %@",
+            controlID,
+            isPressed ? "DOWN" : "UP"
+        ))
+    }
+    _ = logitechControls.connect()
 
     guard eventTap.start() else {
+        logitechControls.disconnect()
         print("[mousefix] Failed to start event tap. Check Accessibility permissions.")
         exit(1)
     }
 
     setupSignalHandlers {
         eventTap.stop()
+        logitechControls.disconnect()
         print("\n[mousefix] Discovery mode stopped.")
         exit(0)
     }
@@ -80,30 +107,81 @@ func runDaemon() {
     haptic.setDeviceFilter(map.hapticDeviceName)
     let laser = LaserPointer()
     let gesture = GestureEngine(buttonMap: map, hapticEngine: haptic)
-    let eventTap = EventTap(buttonMap: map, gestureEngine: gesture, laserPointer: laser)
-
-    haptic.connect()
-
-    guard eventTap.start() else {
-        print("[mousefix] Failed to start event tap. Check Accessibility permissions.")
-        exit(1)
+    let resolver = InputDeviceResolver(targetProductName: map.smoothScroll.deviceName)
+    let verticalScroll = SmoothScrollEngine(settings: map.smoothScroll)
+    let horizontalScroll = SmoothScrollEngine(settings: map.smoothScroll)
+    let eventTap = EventTap(
+        buttonMap: map,
+        gestureEngine: gesture,
+        laserPointer: laser,
+        deviceResolver: resolver,
+        verticalScrollEngine: verticalScroll,
+        horizontalScrollEngine: horizontalScroll
+    )
+    var monitoredControlIDs: Set<UInt16> = [LogitechControlMonitor.smartShiftControlID]
+    if map.logitechGestureEnabled {
+        monitoredControlIDs.formUnion(LogitechControlMonitor.gestureControlIDs)
     }
-
-    setupSignalHandlers {
-        print("\n[mousefix] Shutting down...")
-        eventTap.stop()
-        haptic.disconnect()
-        laser.hide()
-        print("[mousefix] Goodbye.")
-        exit(0)
+    let logitechControls = LogitechControlMonitor(
+        deviceNameFilter: map.smoothScroll.deviceName,
+        monitoredControlIDs: monitoredControlIDs
+    ) { controlID, isPressed in
+        switch controlID {
+        case LogitechControlMonitor.smartShiftControlID:
+            if isPressed {
+                laser.show()
+            } else {
+                laser.hide()
+            }
+        case _ where LogitechControlMonitor.gestureControlIDs.contains(controlID):
+            if isPressed {
+                gesture.buttonDown()
+            } else {
+                gesture.buttonUp()
+            }
+        default:
+            break
+        }
     }
 
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     laser.setup()
 
+    guard eventTap.start() else {
+        print("[mousefix] Failed to start event tap. Check Accessibility permissions.")
+        exit(1)
+    }
+    _ = logitechControls.connect()
+    if map.gestureButton >= 0 {
+        haptic.connect()
+    }
+
+    var didCleanUp = false
+    let cleanup = {
+        guard !didCleanUp else {
+            return
+        }
+        didCleanUp = true
+        print("\n[mousefix] Shutting down...")
+        eventTap.stop()
+        logitechControls.disconnect()
+        haptic.disconnect()
+        laser.hide()
+    }
+
+    setupSignalHandlers {
+        cleanup()
+        print("[mousefix] Goodbye.")
+        exit(0)
+    }
+
     // Menu bar icon
-    setupMenuBar(eventTap: eventTap)
+    setupMenuBar(
+        eventTap: eventTap,
+        logitechControls: logitechControls,
+        cleanup: cleanup
+    )
 
     print("[mousefix] Daemon running. Press Ctrl+C to stop.")
     app.run()
@@ -113,9 +191,17 @@ func runDaemon() {
 
 private var statusItem: NSStatusItem?
 private var eventTapRef: EventTap?
+private var logitechControlsRef: LogitechControlMonitor?
+private var cleanupRef: (() -> Void)?
 
-func setupMenuBar(eventTap: EventTap) {
+func setupMenuBar(
+    eventTap: EventTap,
+    logitechControls: LogitechControlMonitor,
+    cleanup: @escaping () -> Void
+) {
     eventTapRef = eventTap
+    logitechControlsRef = logitechControls
+    cleanupRef = cleanup
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     statusItem?.button?.title = "🖱"
 
@@ -141,11 +227,13 @@ final class MenuActions: NSObject {
     @objc func toggle(_ sender: NSMenuItem) {
         if sender.state == .on {
             eventTapRef?.stop()
+            logitechControlsRef?.disconnect()
             sender.state = .off
             statusItem?.button?.title = "🔇"
             print("[mousefix] Disabled")
         } else {
             _ = eventTapRef?.start()
+            _ = logitechControlsRef?.connect()
             sender.state = .on
             statusItem?.button?.title = "🖱"
             print("[mousefix] Enabled")
@@ -153,6 +241,7 @@ final class MenuActions: NSObject {
     }
 
     @objc func quit(_ sender: NSMenuItem) {
+        cleanupRef?()
         print("[mousefix] Goodbye.")
         NSApp.terminate(nil)
     }
@@ -186,8 +275,11 @@ func printMappings(_ map: ButtonMap) {
     }
 
     // Print gesture config.
-    if map.gestureButton >= 0 {
-        print("  gesture (button \(map.gestureButton)):")
+    if map.gestureButton >= 0 || map.logitechGestureEnabled {
+        let source = map.logitechGestureEnabled
+            ? "Logitech HID++ 0x00C3"
+            : "button \(map.gestureButton)"
+        print("  gesture (\(source)):")
         print("    tap        -> \(describeAction(map.gestureClick))")
         print("    hold+left  -> \(describeAction(map.gestureHoldLeft))")
         print("    hold+right -> \(describeAction(map.gestureHoldRight))")
@@ -195,11 +287,17 @@ func printMappings(_ map: ButtonMap) {
         print("    hold+down  -> \(describeAction(map.gestureHoldDown))")
     }
 
-    // Print tilt scroll.
     if map.tiltLeft != .none || map.tiltRight != .none {
-        print("  tilt scroll:")
+        print("  side wheel:")
         print("    left  -> \(describeAction(map.tiltLeft))")
         print("    right -> \(describeAction(map.tiltRight))")
+    }
+
+    if map.smoothScroll.enabled {
+        print("  smooth scroll:")
+        print("    device   -> \(map.smoothScroll.deviceName)")
+        print("    response -> \(map.smoothScroll.response)")
+        print("    speed    -> \(map.smoothScroll.speed)")
     }
 }
 
@@ -212,6 +310,13 @@ func describeAction(_ action: Action) -> String {
         if mods.contains(.maskShift) { parts.append("Shift") }
         if mods.contains(.maskAlternate) { parts.append("Opt") }
         parts.append(keycodeName(key))
+        return parts.joined(separator: "+")
+    case .heldModifier(let modifiers):
+        var parts: [String] = []
+        if modifiers.contains(.maskCommand) { parts.append("HoldCmd") }
+        if modifiers.contains(.maskControl) { parts.append("HoldCtrl") }
+        if modifiers.contains(.maskShift) { parts.append("HoldShift") }
+        if modifiers.contains(.maskAlternate) { parts.append("HoldOpt") }
         return parts.joined(separator: "+")
     case .middleClick:
         return "MiddleClick"

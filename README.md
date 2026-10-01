@@ -4,7 +4,7 @@
 
 <br/>
 
-[![Swift](https://img.shields.io/badge/Swift_5.9-F05138?style=for-the-badge&logo=swift&logoColor=white)](https://swift.org/)
+[![Swift](https://img.shields.io/badge/Swift_6.0-F05138?style=for-the-badge&logo=swift&logoColor=white)](https://swift.org/)
 [![macOS](https://img.shields.io/badge/macOS_13+-000000?style=for-the-badge&logo=apple&logoColor=white)](https://developer.apple.com/macos/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
@@ -30,8 +30,9 @@ MouseFix gives that back in ~600 lines of Swift. One binary, one YAML config fil
 | Feature | Description |
 |---------|-------------|
 | **Button Remapping** | Map any mouse button to any keyboard shortcut |
+| **Held Modifiers** | Hold Command, Shift, Control, or Option with a mouse button |
 | **Gesture Engine** | Hold a button + swipe mouse for directional actions (Spaces, Expose) |
-| **Tilt Scroll** | Horizontal scroll wheel tilt fires configurable actions (proportional to scroll speed) |
+| **Device-aware Smooth Scroll** | Adds continuous pixel scrolling to the configured mouse and stops when wheel input stops, without changing trackpad events |
 | **Laser Pointer** | Hold a button to project a colored circle on screen |
 | **Haptic Feedback** | Logitech HID++ protocol sends vibration pulses to the mouse |
 | **Discovery Mode** | `mousefix discover` shows what number each button reports |
@@ -43,7 +44,7 @@ MouseFix gives that back in ~600 lines of Swift. One binary, one YAML config fil
 ### 1. Build
 
 ```bash
-git clone https://github.com/JDRV-space/mousefix.git
+git clone https://github.com/zzz-bot-7/mousefix.git
 cd mousefix
 swift build -c release
 
@@ -74,25 +75,13 @@ These are the out-of-the-box mappings. They work immediately if you have an MX M
 |--------|--------|
 | Middle click | MiddleClick (unchanged) |
 | Back thumb | Cmd+Z (Undo) |
-| Forward thumb | Cmd+Shift+Z (Redo) |
-| Top button | Cmd+Shift+4 (Screenshot) |
-| Third thumb | Gesture button (see below) |
-| Below scroll | LaserPointer (hold to show) |
+| Screenshot | Cmd+Shift+4 |
+| Button below screenshot | Hold Command |
+| Large thumb button 6 | Tap: App Switcher; swipe: Spaces, Mission Control, App Expose |
+| Below-scroll SmartShift | LaserPointer (HID++ control `0x00C4`, hold to show) |
+| Horizontal side wheel | Repeated Left/Right Arrow presses |
 
-| Gesture (third thumb) | Action |
-|------------------------|--------|
-| Tap | Cmd+Tab (App Switcher) |
-| Hold + swipe left | Switch to right Space |
-| Hold + swipe right | Switch to left Space |
-| Hold + swipe up | Mission Control |
-| Hold + swipe down | App Expose |
-
-| Tilt Scroll | Action |
-|-------------|--------|
-| Tilt left | Left arrow (proportional) |
-| Tilt right | Right arrow (proportional) |
-
-> The gesture button (third thumb) has dual behavior: quick tap fires App Switcher, hold+swipe fires directional actions  - same as a 4-finger trackpad gesture. When gesture mode is enabled for a button, it replaces that button's direct action. Tilt scroll fires proportionally: small scroll = 1 keypress, fast scroll = multiple.
+The vertical wheel uses continuous pixel scrolling with native macOS scroll phases and stops when wheel input stops. The horizontal side wheel produces proportional Left/Right Arrow presses. Events from Apple trackpads and every unrelated input device pass through unchanged.
 
 
 ## Customizing
@@ -111,24 +100,33 @@ Open `~/.config/mousefix/config.yaml` in any editor. The format maps macOS butto
 buttons:
   2: "MiddleClick"          # Middle click
   3: "Cmd+Z"                # Back thumb -> Undo
-  4: "Cmd+Shift+Z"          # Forward thumb -> Redo
-  5: "Cmd+Shift+4"          # Top button -> Screenshot
-  6: "Cmd+Space"             # Third thumb -> Spotlight
-  7: "LaserPointer"          # Below scroll -> Laser pointer
+  4: "Cmd"                  # Hold Command
+  5: "Cmd+Shift+4"          # Screenshot
+  6: "None"                 # Reserved for gestures
 
-# Gesture: hold a button and swipe (like 4-finger trackpad)
+# SmartShift is HID++ control 0x00C4 and is reserved for the laser pointer.
+
+# The MX Master 4 large thumb control reports as button 6.
 gesture:
-  button: 6                  # Which button triggers gestures
+  button: 6
+  logitech_control: false
   click: "Cmd+Tab"           # Tap -> App Switcher
   hold_left: "Ctrl+Right"   # Swipe left -> Space right
   hold_right: "Ctrl+Left"   # Swipe right -> Space left
   hold_up: "MissionControl"  # Swipe up -> Mission Control
   hold_down: "AppExpose"    # Swipe down -> App Expose
 
-# Horizontal scroll tilt (proportional: fast scroll = multiple keypresses)
+# Side wheel behaves like repeated Left/Right Arrow presses.
 tilt_scroll:
-  left: "Left"              # Tilt left -> Left arrow
-  right: "Right"            # Tilt right -> Right arrow
+  left: "Left"
+  right: "Right"
+
+# Only matching Logitech mouse events are transformed.
+scroll:
+  enabled: true
+  device: "mx master"
+  response: 0.68
+  speed: 1.0
 ```
 
 ### Using a different mouse
@@ -146,13 +144,15 @@ Press each button on your mouse. The output shows the number macOS assigns to it
 [discover] Button UP   - number: 3
 ```
 
-Then edit your config to use those numbers. Any mouse with extra buttons (3+) works for button remapping. Gesture detection and tilt scroll work with any mouse. Haptic feedback is Logitech-only (HID++ protocol).
+Then edit your config to use those numbers. Any mouse with extra buttons (3+) works for button remapping. Gesture detection works with any mouse. Smooth scrolling is limited to the device name configured under `scroll`. Haptic feedback is Logitech-only (HID++ protocol).
 
 ### Action types
 
 | Action | What it does |
 |--------|-------------|
 | `"Cmd+Z"` | Any keyboard shortcut. Modifiers: `Cmd`, `Ctrl`, `Shift`, `Opt` |
+| `"Cmd"` | Holds Command until the mouse button is released |
+| `"Shift"` | Holds Shift until the mouse button is released |
 | `"MiddleClick"` | Native middle click passthrough |
 | `"LaserPointer"` | Red circle overlay follows cursor while button is held |
 | `"MissionControl"` | Triggers Mission Control (via private CoreDock API) |
@@ -185,9 +185,14 @@ Sources/MouseFix/
   KeySynth.swift        Parses "Cmd+Z" strings, synthesizes CGEvent keystrokes
   GestureEngine.swift   Gesture button hold + mouse delta -> directional actions
   HapticEngine.swift    IOKit HID manager + HID++ protocol for haptic feedback
+  LogitechControlMonitor.swift  HID++ SmartShift control diversion
   LaserPointer.swift    NSWindow overlay - transparent circle follows cursor
   Config.swift          YAML config loading via Yams
   ButtonMap.swift       Button number -> Action enum mapping
+  InputDeviceResolver.swift  Physical HID sender -> configured mouse or trackpad
+  SmoothScrollEngine.swift   Pixel scrolling and gesture phases
+Sources/MouseFixHIDBridge/
+  MouseFixHIDBridge.c    Reads the HID sender ID retained by a Quartz event
 ```
 
 ### How it works
@@ -195,16 +200,17 @@ Sources/MouseFix/
 1. **CGEvent tap** intercepts `otherMouseDown/Up` and `scrollWheel` events at the session level
 2. Button number is looked up in the config to find the mapped action
 3. Original mouse event is suppressed and a synthesized keyboard event is posted
-4. **Gesture detection**: when the gesture button is held, mouse deltas accumulate until a 50px threshold triggers a directional action
-5. **Tilt scroll**: horizontal scrollWheel delta fires proportional keypresses (1 per 30 delta units)
-6. **Haptic**: HID++ short report sent to the mouse via IOKit on Space-switch gestures
-7. **Laser pointer**: borderless NSWindow at `.screenSaver` level tracks cursor position
+4. **Gesture detection**: MX Master HID++ control `0x00C3` or a configured numeric button starts gesture tracking; mouse deltas accumulate until a 50px threshold triggers a directional action
+5. **Device routing**: every scroll event is matched to its physical HID service; trackpad and unrelated-device events pass through untouched
+6. **Scroll routing**: horizontal MX Master side-wheel events fire configured left/right actions; vertical wheel impulses become continuous pixel events that end when wheel input stops
+7. **Haptic**: HID++ short report sent to the mouse via IOKit on Space-switch gestures
+8. **Laser pointer**: HID++ control `0x00C4` shows a borderless NSWindow at `.screenSaver` level and restores SmartShift reporting on exit
 
 
 ## Requirements
 
 - macOS 13+ (Ventura or later)
-- Swift 5.9+
+- Swift 6.0+
 - Any multi-button mouse (MX Master 4 defaults built-in, haptic feedback Logitech-only)
 
 

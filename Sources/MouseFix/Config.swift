@@ -47,6 +47,9 @@ struct Config {
             if let btn = gestureDict["button"] as? Int {
                 map.gestureButton = Int64(btn)
             }
+            if let enabled = gestureDict["logitech_control"] as? Bool {
+                map.logitechGestureEnabled = enabled
+            }
             if let v = gestureDict["click"] as? String { map.gestureClick = Action.parse(v) }
             if let v = gestureDict["hold_left"] as? String { map.gestureHoldLeft = Action.parse(v) }
             if let v = gestureDict["hold_right"] as? String { map.gestureHoldRight = Action.parse(v) }
@@ -54,10 +57,30 @@ struct Config {
             if let v = gestureDict["hold_down"] as? String { map.gestureHoldDown = Action.parse(v) }
         }
 
-        // Parse tilt scroll config.
+        // Parse side-wheel actions.
         if let tiltDict = dict["tilt_scroll"] as? [String: String] {
-            if let v = tiltDict["left"] { map.tiltLeft = Action.parse(v) }
-            if let v = tiltDict["right"] { map.tiltRight = Action.parse(v) }
+            if let value = tiltDict["left"] {
+                map.tiltLeft = Action.parse(value)
+            }
+            if let value = tiltDict["right"] {
+                map.tiltRight = Action.parse(value)
+            }
+        }
+
+        // Parse device-scoped smooth scroll config.
+        if let scrollDict = dict["scroll"] as? [String: Any] {
+            if let enabled = scrollDict["enabled"] as? Bool {
+                map.smoothScroll.enabled = enabled
+            }
+            if let device = scrollDict["device"] as? String {
+                map.smoothScroll.deviceName = device
+            }
+            if let response = number(scrollDict["response"]) {
+                map.smoothScroll.response = response
+            }
+            if let speed = number(scrollDict["speed"]) {
+                map.smoothScroll.speed = speed
+            }
         }
 
         // Parse haptic device name (optional).
@@ -79,27 +102,30 @@ struct Config {
         map.buttons = [
             2: .middleClick,                   // Middle click
             3: Action.parse("Cmd+Z"),          // Back thumb -> Undo
-            4: Action.parse("Cmd+Shift+Z"),    // Forward thumb -> Redo
+            4: Action.parse("Cmd"),            // Below screenshot -> hold Command
             5: Action.parse("Cmd+Shift+4"),    // Top button -> Screenshot
-            6: Action.parse("Cmd+Space"),       // Third thumb -> Spotlight
-            7: .laserPointer,                  // Below scroll -> Laser pointer
+            6: .none,                          // Large thumb -> gesture engine
         ]
 
-        // Gesture button: third thumb (button 6) also acts as gesture button.
-        // When gesture is enabled, tap fires gesture_click instead of the
-        // button's direct action. Set gesture_button to -1 to disable gestures
-        // and use the direct Cmd+Space mapping instead.
         map.gestureButton = 6
+        map.logitechGestureEnabled = false
         map.gestureClick = Action.parse("Cmd+Tab")
         map.gestureHoldLeft = Action.parse("Ctrl+Right")
         map.gestureHoldRight = Action.parse("Ctrl+Left")
         map.gestureHoldUp = .missionControl
         map.gestureHoldDown = .appExpose
 
-        // Tilt scroll
         map.tiltLeft = Action.parse("Left")
         map.tiltRight = Action.parse("Right")
+        map.smoothScroll = SmoothScrollSettings()
 
         return map
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let double = value as? Double { return double }
+        if let int = value as? Int { return Double(int) }
+        if let number = value as? NSNumber { return number.doubleValue }
+        return nil
     }
 }

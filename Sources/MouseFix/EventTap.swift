@@ -1,26 +1,70 @@
 import CoreGraphics
 import Foundation
 
+struct SideScrollCommand: Equatable {
+    let action: Action
+    let repeatCount: Int
+
+    static func resolve(delta: ScrollVector, buttonMap: ButtonMap) -> SideScrollCommand? {
+        guard abs(delta.x) >= 0.01, abs(delta.x) >= abs(delta.y) else {
+            return nil
+        }
+
+        let action = delta.x < 0 ? buttonMap.tiltLeft : buttonMap.tiltRight
+        guard action != .none else {
+            return nil
+        }
+
+        return SideScrollCommand(
+            action: action,
+            repeatCount: min(max(1, Int(abs(delta.x) / 30)), 12)
+        )
+    }
+}
+
 /// Intercepts mouse events via CGEvent tap and remaps them according to the button map.
 final class EventTap {
     private let buttonMap: ButtonMap
     private let gestureEngine: GestureEngine
     private let laserPointer: LaserPointer
+    private let deviceResolver: InputDeviceResolver
+    private let verticalScrollEngine: SmoothScrollEngine
+    private let horizontalScrollEngine: SmoothScrollEngine
+    private let heldModifiers: HeldModifierController
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
     /// Whether we're in discovery mode (log events instead of remapping).
     var discoverMode = false
 
-    init(buttonMap: ButtonMap, gestureEngine: GestureEngine, laserPointer: LaserPointer) {
+    init(
+        buttonMap: ButtonMap,
+        gestureEngine: GestureEngine,
+        laserPointer: LaserPointer,
+        deviceResolver: InputDeviceResolver,
+        verticalScrollEngine: SmoothScrollEngine,
+        horizontalScrollEngine: SmoothScrollEngine,
+        heldModifiers: HeldModifierController = HeldModifierController()
+    ) {
         self.buttonMap = buttonMap
         self.gestureEngine = gestureEngine
         self.laserPointer = laserPointer
+        self.deviceResolver = deviceResolver
+        self.verticalScrollEngine = verticalScrollEngine
+        self.horizontalScrollEngine = horizontalScrollEngine
+        self.heldModifiers = heldModifiers
     }
 
     /// Start intercepting mouse events. Must be called on the main thread.
     func start() -> Bool {
         let eventMask: CGEventMask =
+            (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue) |
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.leftMouseUp.rawValue) |
+            (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseUp.rawValue) |
             (1 << CGEventType.otherMouseDown.rawValue) |
             (1 << CGEventType.otherMouseUp.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue) |
@@ -56,6 +100,10 @@ final class EventTap {
     }
 
     func stop() {
+        verticalScrollEngine.stop()
+        horizontalScrollEngine.stop()
+        heldModifiers.releaseAll()
+        laserPointer.hide()
         if let tap = tap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -70,7 +118,15 @@ final class EventTap {
 
     /// Called for every intercepted event. Returns nil to suppress, or the event to pass through.
     func handleEvent(type: CGEventType, event: CGEvent) -> CGEvent? {
+        if !KeySynth.isSynthetic(event) {
+            heldModifiers.applyActiveFlags(to: event)
+        }
+
         switch type {
+        case .keyDown, .keyUp, .flagsChanged,
+             .leftMouseDown, .leftMouseUp,
+             .rightMouseDown, .rightMouseUp:
+            return event
         case .otherMouseDown:
             return handleButtonDown(event: event)
         case .otherMouseUp:
@@ -82,6 +138,7 @@ final class EventTap {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             // Re-enable the tap if macOS disables it.
             print("[event-tap] Tap was disabled, re-enabling...")
+            heldModifiers.releaseAll()
             if let tap = tap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
@@ -101,18 +158,24 @@ final class EventTap {
 
         // Check if this is the gesture button.
         if gestureEngine.isEnabled && button == gestureEngine.gestureButtonNumber {
-            gestureEngine.buttonDown(event: event)
+            gestureEngine.buttonDown()
             return nil // suppress
         }
 
-        // Check if this is the scroll button (laser pointer trigger).
         if let action = buttonMap.action(forButton: button) {
-            if action == .laserPointer {
+            switch action {
+            case .middleClick:
+                return event
+            case .laserPointer:
                 laserPointer.show()
                 return nil
+            case .heldModifier(let modifiers):
+                heldModifiers.press(button: button, modifiers: modifiers)
+                return nil
+            default:
+                KeySynth.fire(action)
+                return nil
             }
-            KeySynth.fire(action)
-            return nil // suppress original
         }
 
         return event
@@ -127,16 +190,23 @@ final class EventTap {
         }
 
         if gestureEngine.isEnabled && button == gestureEngine.gestureButtonNumber {
-            gestureEngine.buttonUp(event: event)
+            gestureEngine.buttonUp()
             return nil
         }
 
         if let action = buttonMap.action(forButton: button) {
-            if action == .laserPointer {
+            switch action {
+            case .middleClick:
+                return event
+            case .laserPointer:
                 laserPointer.hide()
                 return nil
+            case .heldModifier:
+                heldModifiers.release(button: button)
+                return nil
+            default:
+                return nil
             }
-            return nil // already fired on down
         }
 
         return event
@@ -155,26 +225,53 @@ final class EventTap {
     }
 
     private func handleScroll(event: CGEvent) -> CGEvent? {
-        // Check horizontal axis for tilt scroll.
-        let horizontal = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
-
-        if horizontal == 0 { return event }
-
         if discoverMode {
-            print("[discover] Scroll tilt - horizontal delta: \(horizontal)")
+            let delta = SmoothScrollEngine.pixelDelta(from: event)
+            let descriptor = deviceResolver.descriptor(for: event)
+            let product = descriptor?.product ?? "unknown"
+            let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
+            let scrollPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
+            let momentumPhase = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
+            print(
+                "[discover] Scroll device=\(product) x=\(delta.x) y=\(delta.y) " +
+                "continuous=\(continuous) phase=\(scrollPhase) momentum=\(momentumPhase)"
+            )
             return event
         }
 
-        // Proportional: 1 arrow per 30 delta units, minimum 1
-        let absDelta = abs(Int(horizontal))
-        let repeats = max(1, absDelta / 30)
-        let action = horizontal < 0 ? buttonMap.tiltLeft : buttonMap.tiltRight
-
-        for _ in 0..<repeats {
-            KeySynth.fire(action)
+        if SmoothScrollEngine.isSynthetic(event) {
+            return event
         }
 
-        return nil // suppress original tilt
+        // Native trackpad and unrelated-device events pass through unchanged.
+        // Only the configured physical mouse is rewritten.
+        guard deviceResolver.kind(for: event) == .targetMouse else {
+            return event
+        }
+
+        // A target-device event that already carries native gesture phases is
+        // already trackpad-shaped and must not be smoothed a second time.
+        let hasNativeScrollPhase = event.getIntegerValueField(.scrollWheelEventScrollPhase) != 0
+        let hasNativeMomentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase) != 0
+        if hasNativeScrollPhase || hasNativeMomentum {
+            return event
+        }
+
+        let delta = SmoothScrollEngine.pixelDelta(from: event)
+        if abs(delta.x) >= 0.01, abs(delta.x) >= abs(delta.y) {
+            if let command = SideScrollCommand.resolve(delta: delta, buttonMap: buttonMap) {
+                for _ in 0 ..< command.repeatCount {
+                    KeySynth.fire(command.action)
+                }
+                return nil
+            }
+
+            let horizontalDelta = ScrollVector(x: delta.x, y: 0)
+            return horizontalScrollEngine.consume(event, delta: horizontalDelta) ? nil : event
+        }
+
+        let verticalDelta = ScrollVector(x: 0, y: delta.y)
+        return verticalScrollEngine.consume(event, delta: verticalDelta) ? nil : event
     }
 }
 
@@ -187,12 +284,14 @@ private func eventTapCallback(
     event: CGEvent,
     userInfo: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    guard let userInfo = userInfo else { return Unmanaged.passRetained(event) }
+    guard let userInfo = userInfo else { return Unmanaged.passUnretained(event) }
 
     let tap = Unmanaged<EventTap>.fromOpaque(userInfo).takeUnretainedValue()
 
     if let result = tap.handleEvent(type: type, event: event) {
-        return Unmanaged.passRetained(result)
+        // CoreGraphics owns the incoming event. Returning it retained leaks
+        // one reference for every intercepted mouse or keyboard event.
+        return Unmanaged.passUnretained(result)
     }
     return nil // suppress event
 }

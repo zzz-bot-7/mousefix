@@ -33,14 +33,14 @@ final class GestureEngine {
     /// Whether gesture mode is enabled (gesture button is configured).
     var isEnabled: Bool { gestureButtonNumber >= 0 }
 
-    func buttonDown(event: CGEvent) {
+    func buttonDown() {
         isHeld = true
         hasFiredDirection = false
         deltaX = 0
         deltaY = 0
     }
 
-    func buttonUp(event: CGEvent) {
+    func buttonUp() {
         guard isHeld else { return }
         isHeld = false
 

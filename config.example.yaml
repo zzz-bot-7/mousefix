@@ -6,6 +6,8 @@
 #
 # Actions:
 #   "Cmd+Z"          any keyboard shortcut (Cmd, Ctrl, Shift, Opt + key)
+#   "Cmd"            hold Command for as long as the mouse button is held
+#   "Shift"          hold Shift for as long as the mouse button is held
 #   "MiddleClick"    native middle click
 #   "LaserPointer"   laser pointer circle while held
 #   "MissionControl" trigger Mission Control
@@ -18,26 +20,35 @@
 buttons:
   2: "MiddleClick"          # Middle click (scroll wheel press)
   3: "Cmd+Z"                # Back thumb -> Undo
-  4: "Cmd+Shift+Z"          # Forward thumb -> Redo
-  5: "Cmd+Shift+4"           # Top button -> Screenshot
-  6: "Cmd+Space"             # Third thumb -> Spotlight
-  7: "LaserPointer"          # Below scroll wheel -> Laser pointer (hold)
+  4: "Cmd"                  # Below screenshot -> hold Command
+  5: "Cmd+Shift+4"          # Screenshot
+  6: "None"                 # Large thumb button is handled by gesture config
 
-# Gesture: hold a button and swipe the mouse in a direction.
-# Set button to -1 to disable gestures entirely.
-# When enabled, the gesture button's direct action (above) is replaced by tap/hold behavior.
+# The below-scroll SmartShift button is Logitech HID++ control 0x00C4, not a
+# standard macOS button number. MouseFix reserves it for the laser pointer.
+
+# Hardware discovery confirms the large thumb control is macOS button 6.
 gesture:
-  button: 6                  # Which button triggers gestures (third thumb)
+  button: 6
+  logitech_control: false
   click: "Cmd+Tab"           # Tap -> App Switcher
   hold_left: "Ctrl+Right"   # Hold + swipe left -> Space right
   hold_right: "Ctrl+Left"   # Hold + swipe right -> Space left
   hold_up: "MissionControl"  # Hold + swipe up -> Mission Control
   hold_down: "AppExpose"    # Hold + swipe down -> App Expose
 
-# Horizontal scroll wheel tilt.
+# Side wheel behaves like repeated Left/Right Arrow presses.
 tilt_scroll:
-  left: "Left"              # Tilt left -> Left arrow (proportional)
-  right: "Right"            # Tilt right -> Right arrow (proportional)
+  left: "Left"
+  right: "Right"
+
+# Smooth only the configured physical mouse. Trackpad scroll events pass
+# through untouched, including Apple's own gesture and momentum phases.
+scroll:
+  enabled: true
+  device: "mx master"
+  response: 0.68
+  speed: 1.0
 
 # Haptic feedback (Logitech HID++ devices only).
 # Device name is a substring match, case-insensitive.

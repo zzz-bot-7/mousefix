@@ -7,6 +7,7 @@ func CoreDockSendNotification(_ notification: CFString) -> Void
 
 /// Synthesizes keyboard events from action strings like "Cmd+Z".
 enum KeySynth {
+    static let syntheticMarker: Int64 = 0x4D4F5553454B4559
 
     // MARK: - Virtual Keycode Table
 
@@ -97,6 +98,8 @@ enum KeySynth {
         switch action {
         case .keystroke(let modifiers, let keyCode):
             sendKeystroke(keyCode: keyCode, flags: modifiers)
+        case .heldModifier:
+            break
         case .middleClick:
             sendMiddleClick()
         case .missionControl:
@@ -118,23 +121,36 @@ enum KeySynth {
             return
         }
 
-        var allFlags = flags
-        // Arrow keys (0x7B-0x7E) need numericPad + secondaryFn flags
+        let allFlags = effectiveFlags(for: keyCode, baseFlags: flags)
+        keyDown.flags = allFlags
+        keyUp.flags = allFlags
+        markSynthetic(keyDown)
+        markSynthetic(keyUp)
+
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+    }
+
+    static func effectiveFlags(
+        for keyCode: UInt16,
+        baseFlags: CGEventFlags
+    ) -> CGEventFlags {
+        var allFlags = baseFlags
+        // Plain arrows only need numericPad. macOS global shortcuts such as
+        // Control+Left/Right expect the navigation/function flag found on
+        // physical modified-arrow events.
         if keyCode >= 0x7B && keyCode <= 0x7E {
             allFlags.insert(.maskNumericPad)
-            allFlags.insert(.maskSecondaryFn)
+            if !baseFlags.isEmpty {
+                allFlags.insert(.maskSecondaryFn)
+            }
         }
         // Function keys (F1-F15) need secondaryFn flag
         let fnKeyCodes: Set<UInt16> = [0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71]
         if fnKeyCodes.contains(keyCode) {
             allFlags.insert(.maskSecondaryFn)
         }
-
-        keyDown.flags = allFlags
-        keyUp.flags = allFlags
-
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        return allFlags
     }
 
     /// Send a middle mouse click (button 2 down + up).
@@ -151,5 +167,101 @@ enum KeySynth {
 
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    static func markSynthetic(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: syntheticMarker)
+    }
+
+    static func isSynthetic(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == syntheticMarker
+    }
+}
+
+/// Keeps modifier-key state synchronized with mouse button down/up events.
+///
+/// Multiple buttons may hold modifiers simultaneously. Releasing one button
+/// preserves modifiers still held by another button, and `releaseAll()` keeps
+/// shutdown or event-tap resets from leaving a modifier logically stuck.
+final class HeldModifierController {
+    private static let modifierKeyCodes: [(flag: CGEventFlags, keyCode: UInt16)] = [
+        (.maskCommand, 0x37),
+        (.maskShift, 0x38),
+        (.maskAlternate, 0x3A),
+        (.maskControl, 0x3B),
+    ]
+
+    private let eventSink: (CGEvent) -> Void
+    private var modifiersByButton: [Int64: CGEventFlags] = [:]
+
+    private(set) var activeFlags = CGEventFlags()
+
+    init(eventSink: @escaping (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }) {
+        self.eventSink = eventSink
+    }
+
+    func press(button: Int64, modifiers: CGEventFlags) {
+        guard modifiersByButton[button] == nil else {
+            return
+        }
+
+        let previousFlags = activeFlags
+        modifiersByButton[button] = modifiers
+        let nextFlags = combinedFlags()
+        postTransitions(from: previousFlags, to: nextFlags)
+        activeFlags = nextFlags
+    }
+
+    func release(button: Int64) {
+        guard modifiersByButton.removeValue(forKey: button) != nil else {
+            return
+        }
+
+        let previousFlags = activeFlags
+        let nextFlags = combinedFlags()
+        postTransitions(from: previousFlags, to: nextFlags)
+        activeFlags = nextFlags
+    }
+
+    func releaseAll() {
+        let previousFlags = activeFlags
+        modifiersByButton.removeAll()
+        postTransitions(from: previousFlags, to: [])
+        activeFlags = []
+    }
+
+    func applyActiveFlags(to event: CGEvent) {
+        guard !activeFlags.isEmpty else {
+            return
+        }
+
+        var flags = event.flags
+        flags.formUnion(activeFlags)
+        event.flags = flags
+    }
+
+    private func combinedFlags() -> CGEventFlags {
+        modifiersByButton.values.reduce(into: CGEventFlags()) { result, flags in
+            result.formUnion(flags)
+        }
+    }
+
+    private func postTransitions(from previousFlags: CGEventFlags, to nextFlags: CGEventFlags) {
+        for modifier in Self.modifierKeyCodes {
+            let wasActive = previousFlags.contains(modifier.flag)
+            let isActive = nextFlags.contains(modifier.flag)
+            guard wasActive != isActive,
+                  let event = CGEvent(
+                      keyboardEventSource: nil,
+                      virtualKey: modifier.keyCode,
+                      keyDown: isActive
+                  ) else {
+                continue
+            }
+
+            event.flags = nextFlags
+            KeySynth.markSynthetic(event)
+            eventSink(event)
+        }
     }
 }
